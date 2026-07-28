@@ -739,7 +739,15 @@ impl Mint {
                         method,
                         err
                     );
-                    Error::UnsupportedUnit
+                    match err {
+                        cdk_common::payment::Error::TicketUnknownOrExpired => {
+                            Error::OfferTicketUnknownOrExpired
+                        }
+                        cdk_common::payment::Error::TicketAlreadyClaimed => {
+                            Error::OfferTicketAlreadyClaimed
+                        }
+                        _ => Error::UnsupportedUnit,
+                    }
                 })?;
 
             if payment_quote.unit() != unit {

@@ -299,14 +299,41 @@ impl Mint {
                         }
                     }
 
+                    if let Some(ref ticket) = request.ticket {
+                        if ticket.len() > MAX_REQUEST_FIELD_LEN {
+                            return Err(Error::RequestFieldTooLarge {
+                                field: "ticket".to_string(),
+                                actual: ticket.len(),
+                                max: MAX_REQUEST_FIELD_LEN,
+                            });
+                        }
+
+                        // NUT-XX: a quote claimed from an offer MUST be locked
+                        // to a NUT-20 pubkey, otherwise whoever scans the
+                        // public offer first could mint the funds.
+                        if pubkey.is_none() {
+                            return Err(Error::PubkeyRequired);
+                        }
+                    }
+
                     let mint_ttl = self.quote_ttl().await?.mint_ttl;
                     let quote_expiry = unix_time() + mint_ttl;
 
-                    // Convert extra serde_json::Value to JSON string if not null
-                    let extra_json = if request.extra.is_null() {
-                        None
-                    } else {
-                        Some(request.extra.to_string())
+                    // Convert extra serde_json::Value to JSON string if not
+                    // null. The NUT-XX ticket travels to the backend inside
+                    // extra_json under the "ticket" key, which keeps the
+                    // payment-processor wire protocol unchanged.
+                    let extra_json = match request.ticket {
+                        None => (!request.extra.is_null()).then(|| request.extra.to_string()),
+                        Some(ticket) => {
+                            let mut extra_map = match request.extra {
+                                serde_json::Value::Object(map) => map,
+                                _ => serde_json::Map::new(),
+                            };
+                            extra_map
+                                .insert("ticket".to_string(), serde_json::Value::String(ticket));
+                            Some(serde_json::Value::Object(extra_map).to_string())
+                        }
                     };
 
                     let custom_options = CustomIncomingPaymentOptions {
@@ -331,7 +358,15 @@ impl Mint {
                 .await
                 .map_err(|err| {
                     tracing::error!("Could not create invoice: {}", err);
-                    Error::InvalidPaymentRequest
+                    match err {
+                        cdk_common::payment::Error::TicketUnknownOrExpired => {
+                            Error::OfferTicketUnknownOrExpired
+                        }
+                        cdk_common::payment::Error::TicketAlreadyClaimed => {
+                            Error::OfferTicketAlreadyClaimed
+                        }
+                        _ => Error::InvalidPaymentRequest,
+                    }
                 })?;
 
             let now = unix_time();

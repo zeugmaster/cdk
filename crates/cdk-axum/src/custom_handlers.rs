@@ -518,15 +518,31 @@ pub async fn get_check_melt_custom_quote(
     Ok(melt_quote_response_to_json(quote))
 }
 
+/// Whether a melt request should get an immediate PENDING response.
+///
+/// Onchain and custom methods always use the async flow regardless of the
+/// caller's preference: custom methods are settled by the operator out-of-band
+/// (NUT-XX melt offers REQUIRE a PENDING response), so waiting synchronously
+/// would only run into the pending-melt timeout.
+fn wants_async_response(
+    prefer: &PreferHeader,
+    payload: &cdk::nuts::MeltRequest<QuoteId>,
+    method: &str,
+) -> bool {
+    let method_pm = PaymentMethod::from(method);
+    prefer.respond_async
+        || payload.is_prefer_async()
+        || method_pm.is_onchain()
+        || method_pm.is_custom()
+}
+
 async fn process_melt_request(
     prefer: PreferHeader,
     state: &MintState,
     method: &str,
     payload: &cdk::nuts::MeltRequest<QuoteId>,
 ) -> Result<MeltQuoteResponse<QuoteId>, cdk::Error> {
-    // Check for async preference in either the Prefer header or the request body
-    // For onchain we always want to do the async flow
-    let respond_async = prefer.respond_async || payload.is_prefer_async() || method == "onchain";
+    let respond_async = wants_async_response(&prefer, payload, method);
 
     let pending = state.mint.melt(payload).await?;
 
@@ -933,6 +949,37 @@ mod tests {
             keyset_id,
             SecretKey::generate().public_key(),
         )]
+    }
+
+    #[test]
+    fn test_custom_and_onchain_melts_are_always_async() {
+        let no_preference = PreferHeader {
+            respond_async: false,
+        };
+        let payload = cdk::nuts::MeltRequest::<QuoteId>::new(QuoteId::new(), Vec::new(), None);
+
+        // Custom methods and onchain force the async flow even without a
+        // Prefer header or body flag (NUT-XX melt offers require PENDING).
+        assert!(wants_async_response(&no_preference, &payload, "branch"));
+        assert!(wants_async_response(&no_preference, &payload, "onchain"));
+
+        // Known lightning methods keep the synchronous default.
+        assert!(!wants_async_response(&no_preference, &payload, "bolt11"));
+        assert!(!wants_async_response(&no_preference, &payload, "bolt12"));
+
+        // The header and body preferences still work for lightning methods.
+        let prefer = PreferHeader {
+            respond_async: true,
+        };
+        assert!(wants_async_response(&prefer, &payload, "bolt11"));
+        let async_payload =
+            cdk::nuts::MeltRequest::<QuoteId>::new(QuoteId::new(), Vec::new(), None)
+                .prefer_async(true);
+        assert!(wants_async_response(
+            &no_preference,
+            &async_payload,
+            "bolt11"
+        ));
     }
 
     #[tokio::test]
