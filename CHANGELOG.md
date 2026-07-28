@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+### Added
+- cashu: Draft NUT-XX quote offer encoding (`QuoteOffer`, `cquoteA…` strings), a typed `ticket` field on `MintQuoteCustomRequest`, and the NUT-XX mint info settings entry ([zeugmaster]).
+- cdk: Mint-side quote offer ticket handling — ticket-claiming quote requests require a NUT-20 pubkey and the ticket is forwarded to the payment backend via `extra_json` (no payment-processor protocol change) ([zeugmaster]).
+- cdk: `Wallet::claim_quote_offer` for claiming mint and melt quote offers ([zeugmaster]).
+- cdk-common: Error codes 20010 (offer ticket unknown or expired) and 20011 (offer ticket already claimed), propagated from payment backends through the gRPC payment processor ([zeugmaster]).
+- cdk-ffi: `QuoteOffer` bindings and `Wallet::claim_quote_offer` ([zeugmaster]).
+
+### Changed
+- cdk-axum: Custom-method melt requests now always respond asynchronously with a `PENDING` state, like onchain melts; wallets monitor the quote to completion ([zeugmaster]).
+
 ## [0.17.0](https://github.com/cashubtc/cdk/releases/tag/v0.17.0)
 
 ### Summary
@@ -863,6 +873,7 @@ Additionally, this release introduces a Mint binary cdk-mintd that uses the cdk-
 - cdk(wallet): Added get reserved proofs ([thesimplekid]).
 <!-- Contributors -->
 [thesimplekid]: https://github.com/thesimplekid
+[zeugmaster]: https://github.com/zeugmaster
 [davidcaseria]: https://github.com/davidcaseria
 [vnprc]: https://github.com/vnprc
 [cjbeery24]: https://github.com/cjbeery24

@@ -265,6 +265,18 @@ impl Wallet {
         Ok(quote.into())
     }
 
+    /// Claim a NUT-XX quote offer (draft) against this wallet's mint.
+    ///
+    /// Mint offers become a mint quote locked to a fresh NUT-20 key; melt
+    /// offers become a melt quote whose request is the offer's ticket.
+    pub async fn claim_quote_offer(
+        &self,
+        offer: std::sync::Arc<QuoteOffer>,
+    ) -> Result<ClaimedOffer, FfiError> {
+        let claimed = self.inner.claim_quote_offer(offer.inner()).await?;
+        Ok(claimed.into())
+    }
+
     /// Check a mint quote status from the mint.
     ///
     /// Calls `GET /v1/mint/quote/{method}/{quote_id}` per NUT-04.
