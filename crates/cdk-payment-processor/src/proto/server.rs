@@ -282,7 +282,10 @@ impl CdkPaymentProcessor for PaymentProcessorServer {
             .inner
             .create_incoming_payment_request(proto_options)
             .await
-            .map_err(|_| Status::internal("Could not create invoice"))?;
+            .map_err(|err| {
+                tracing::error!("Could not create invoice: {}", err);
+                payment_error_to_status(err, "Could not create invoice")
+            })?;
 
         Ok(Response::new(invoice_response.into()))
     }
@@ -390,7 +393,7 @@ impl CdkPaymentProcessor for PaymentProcessorServer {
             .await
             .map_err(|err| {
                 tracing::error!("Could not get payment quote: {}", err);
-                Status::internal("Could not get quote")
+                payment_error_to_status(err, "Could not get quote")
             })?;
 
         Ok(Response::new(payment_quote.into()))
@@ -627,4 +630,18 @@ impl CdkPaymentProcessor for PaymentProcessorServer {
 fn parse_quote_id(s: &str) -> Result<QuoteId, Status> {
     s.parse()
         .map_err(|err| Status::invalid_argument(format!("Invalid quote_id: {err}")))
+}
+
+/// Map a backend error to a gRPC status on the quote-creation RPCs.
+///
+/// The NUT-XX ticket errors keep their identity (as `NotFound`/`AlreadyExists`
+/// via the [`From<Error>`] impl for [`Status`]) so the mint can surface error
+/// codes 20010/20011; every other error keeps the historical constant-message
+/// `internal` status to avoid leaking backend details.
+fn payment_error_to_status(err: cdk_common::payment::Error, fallback: &'static str) -> Status {
+    match err {
+        cdk_common::payment::Error::TicketUnknownOrExpired
+        | cdk_common::payment::Error::TicketAlreadyClaimed => Error::Payment(err).into(),
+        _ => Status::internal(fallback),
+    }
 }

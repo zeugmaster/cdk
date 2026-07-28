@@ -77,6 +77,18 @@ pub enum Error {
     /// Invalid hash
     #[error("Invalid hash")]
     InvalidHash,
+    /// Offer ticket is unknown or expired (NUT-XX, error code 20010)
+    ///
+    /// Returned by backends that issue quote-offer tickets when a quote
+    /// request references a ticket they do not know or that has expired.
+    #[error("Offer ticket is unknown or expired")]
+    TicketUnknownOrExpired,
+    /// Offer ticket has already been claimed (NUT-XX, error code 20011)
+    ///
+    /// Returned by backends that issue quote-offer tickets when a quote
+    /// request references a ticket that was already claimed by another quote.
+    #[error("Offer ticket has already been claimed")]
+    TicketAlreadyClaimed,
     /// Custom
     #[error("`{0}`")]
     Custom(String),

@@ -62,6 +62,17 @@ impl From<Error> for Status {
             Error::Bolt12Parse => Status::invalid_argument("BOLT12 parse error"),
             Error::NUT00(err) => Status::internal(format!("NUT00 error: {err}")),
             Error::NUT05(err) => Status::internal(format!("NUT05 error: {err}")),
+            // NUT-XX quote offer ticket errors are the reserved meaning of the
+            // `NotFound` and `AlreadyExists` status codes on the quote-creation
+            // RPCs (`CreatePayment`, `GetPaymentQuote`). This lets the ticket
+            // error codes (20010/20011) cross the gRPC boundary without a proto
+            // or protocol-version change; the client maps them back by code.
+            Error::Payment(cdk_common::payment::Error::TicketUnknownOrExpired) => {
+                Status::not_found("Offer ticket is unknown or expired")
+            }
+            Error::Payment(cdk_common::payment::Error::TicketAlreadyClaimed) => {
+                Status::already_exists("Offer ticket has already been claimed")
+            }
             Error::Payment(err) => Status::internal(format!("Payment error: {err}")),
         }
     }
@@ -87,5 +98,29 @@ impl From<Error> for cdk_common::payment::Error {
             Error::NUT05(err) => err.into(),
             Error::Payment(err) => err,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tonic::Code;
+
+    use super::*;
+
+    #[test]
+    fn test_ticket_errors_map_to_reserved_status_codes() {
+        let status = Status::from(Error::Payment(
+            cdk_common::payment::Error::TicketUnknownOrExpired,
+        ));
+        assert_eq!(status.code(), Code::NotFound);
+
+        let status = Status::from(Error::Payment(
+            cdk_common::payment::Error::TicketAlreadyClaimed,
+        ));
+        assert_eq!(status.code(), Code::AlreadyExists);
+
+        // Other payment errors keep the historical internal status.
+        let status = Status::from(Error::Payment(cdk_common::payment::Error::UnsupportedUnit));
+        assert_eq!(status.code(), Code::Internal);
     }
 }

@@ -223,7 +223,7 @@ impl MintPayment for PaymentProcessorClient {
             .await
             .map_err(|err| {
                 tracing::error!("Could not create payment request: {}", err);
-                cdk_common::payment::Error::Custom(err.to_string())
+                status_to_payment_error(err)
             })?;
 
         let response = response.into_inner();
@@ -316,7 +316,7 @@ impl MintPayment for PaymentProcessorClient {
             .await
             .map_err(|err| {
                 tracing::error!("Could not get payment quote: {}", err);
-                cdk_common::payment::Error::Custom(err.to_string())
+                status_to_payment_error(err)
             })?;
 
         let response = response.into_inner();
@@ -524,5 +524,50 @@ impl MintPayment for PaymentProcessorClient {
         Ok(check_outgoing
             .try_into()
             .map_err(|_| cdk_common::payment::Error::UnknownPaymentState)?)
+    }
+}
+
+/// Map a gRPC status from the quote-creation RPCs back to a payment error.
+///
+/// `NotFound` and `AlreadyExists` carry the NUT-XX ticket errors across the
+/// gRPC boundary (see the `From<Error> for Status` impl in `crate::error`);
+/// everything else keeps the historical string passthrough.
+fn status_to_payment_error(status: tonic::Status) -> cdk_common::payment::Error {
+    match status.code() {
+        tonic::Code::NotFound => cdk_common::payment::Error::TicketUnknownOrExpired,
+        tonic::Code::AlreadyExists => cdk_common::payment::Error::TicketAlreadyClaimed,
+        _ => cdk_common::payment::Error::Custom(status.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ticket_errors_round_trip_through_status() {
+        for err in [
+            cdk_common::payment::Error::TicketUnknownOrExpired,
+            cdk_common::payment::Error::TicketAlreadyClaimed,
+        ] {
+            let status = tonic::Status::from(crate::error::Error::Payment(err));
+            let code = status.code();
+            let round_tripped = status_to_payment_error(status);
+            match code {
+                tonic::Code::NotFound => assert!(matches!(
+                    round_tripped,
+                    cdk_common::payment::Error::TicketUnknownOrExpired
+                )),
+                tonic::Code::AlreadyExists => assert!(matches!(
+                    round_tripped,
+                    cdk_common::payment::Error::TicketAlreadyClaimed
+                )),
+                other => panic!("unexpected status code {other:?}"),
+            }
+        }
+
+        // Control: unrelated statuses stay generic.
+        let err = status_to_payment_error(tonic::Status::internal("Could not create invoice"));
+        assert!(matches!(err, cdk_common::payment::Error::Custom(_)));
     }
 }
