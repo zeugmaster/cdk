@@ -394,6 +394,13 @@ pub struct MintQuoteCustomRequest {
     /// NUT-19 Pubkey
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<PublicKey>,
+    /// NUT-XX quote offer ticket
+    ///
+    /// Single-use ticket issued by the mint's payment backend. When set, the
+    /// mint requires `pubkey` (NUT-20) and forwards the ticket to the backend
+    /// for validation; the first quote request referencing a ticket wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
     /// Extra payment-method-specific fields
     ///
     /// These fields are flattened into the JSON representation, allowing
@@ -1195,6 +1202,45 @@ mod tests {
         assert_eq!(
             settings.remove_settings(&CurrencyUnit::Sat, &PaymentMethod::BOLT11),
             None
+        );
+    }
+
+    #[test]
+    fn test_custom_request_ticket_captured_as_typed_field() {
+        // A top-level "ticket" key lands in the typed field, not in `extra`.
+        let request: MintQuoteCustomRequest =
+            from_str(r#"{"amount":500,"unit":"ora","ticket":"MINT-abc"}"#).unwrap();
+        assert_eq!(request.ticket.as_deref(), Some("MINT-abc"));
+        // The flatten collector keeps only unclaimed keys (it yields an empty
+        // object here, not null) — "ticket" must not be duplicated into it.
+        assert!(request.extra.get("ticket").is_none());
+        assert!(request
+            .extra
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty));
+
+        // Ticket and other extra fields coexist.
+        let request: MintQuoteCustomRequest =
+            from_str(r#"{"amount":500,"unit":"ora","ticket":"MINT-abc","share":"deadbeef"}"#)
+                .unwrap();
+        assert_eq!(request.ticket.as_deref(), Some("MINT-abc"));
+        assert_eq!(request.extra, json!({"share": "deadbeef"}));
+    }
+
+    #[test]
+    fn test_custom_request_without_ticket_is_wire_identical() {
+        let request = MintQuoteCustomRequest {
+            amount: Some(Amount::from(500)),
+            unit: CurrencyUnit::Sat,
+            description: None,
+            pubkey: None,
+            ticket: None,
+            extra: serde_json::Value::Null,
+        };
+        let serialized = to_string(&request).unwrap();
+        assert!(
+            !serialized.contains("ticket"),
+            "absent ticket must not appear on the wire: {serialized}"
         );
     }
 }

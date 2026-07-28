@@ -877,6 +877,7 @@ mod tests {
                     unit: CurrencyUnit::Sat,
                     description: None,
                     pubkey: None,
+                    ticket: None,
                     extra: Value::Null,
                 },
             })

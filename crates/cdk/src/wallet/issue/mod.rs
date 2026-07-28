@@ -240,6 +240,7 @@ impl Wallet {
                         unit: unit.clone(),
                         description,
                         pubkey: Some(secret_key.public_key()),
+                        ticket: None,
                         extra: serde_json::from_str(extra.as_deref().unwrap_or("{}"))?,
                     },
                 }

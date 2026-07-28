@@ -99,7 +99,8 @@ impl MintBuilder {
                 .nut12(true)
                 .nut14(true)
                 .nut20(true)
-                .nut29(cdk_common::nut29::Settings::default()),
+                .nut29(cdk_common::nut29::Settings::default())
+                .nutxx(true),
             ..Default::default()
         };
 
@@ -931,6 +932,14 @@ mod tests {
         assert!(
             mint_info.nuts.nut29.is_empty(),
             "NUT-29 should have empty settings by default"
+        );
+        assert!(
+            mint_info
+                .nuts
+                .nutxx
+                .as_ref()
+                .is_some_and(|settings| settings.supported),
+            "NUT-XX (quote offers) should be supported by default"
         );
     }
 

@@ -337,6 +337,13 @@ pub struct Nuts {
     #[serde(rename = "29")]
     #[serde(skip_serializing_if = "nut29::Settings::is_empty")]
     pub nut29: nut29::Settings,
+    /// NUT-XX Settings (draft: quote offers)
+    ///
+    /// Optional and keyed by the draft placeholder `"XX"`; renamed once the
+    /// NUT is assigned a number.
+    #[serde(rename = "XX")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nutxx: Option<SupportedSettings>,
 }
 
 impl Nuts {
@@ -458,6 +465,14 @@ impl Nuts {
     pub fn nut29(self, settings: nut29::Settings) -> Self {
         Self {
             nut29: settings,
+            ..self
+        }
+    }
+
+    /// NutXX settings (draft: quote offers)
+    pub fn nutxx(self, supported: bool) -> Self {
+        Self {
+            nutxx: Some(SupportedSettings { supported }),
             ..self
         }
     }
@@ -721,6 +736,27 @@ mod tests {
         assert!(!parsed["nuts"]["15"].is_null());
         assert!(parsed["nuts"]["15"]["methods"].is_array());
         assert_eq!(parsed["nuts"]["15"]["methods"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_nutxx_settings_round_trip_and_absent_by_default() {
+        // Absent by default: no "XX" key serialized, deserializes to None.
+        let default_nuts = Nuts::default();
+        assert!(default_nuts.nutxx.is_none());
+        let json = serde_json::to_string(&default_nuts).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("XX").is_none());
+
+        // Set: round trips through the "XX" key.
+        let nuts = Nuts::default().nutxx(true);
+        let json = serde_json::to_string(&nuts).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["XX"]["supported"], true);
+        let round_tripped: Nuts = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round_tripped.nutxx,
+            Some(SupportedSettings { supported: true })
+        );
     }
 
     #[test]

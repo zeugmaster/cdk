@@ -1259,6 +1259,7 @@ mod tests {
                 unit: cdk_common::CurrencyUnit::Sat,
                 description: None,
                 pubkey: None,
+                ticket: None,
                 extra: serde_json::Value::Null,
             },
         };
@@ -1318,6 +1319,7 @@ mod tests {
                     unit: cdk_common::CurrencyUnit::Sat,
                     description: None,
                     pubkey: None,
+                    ticket: None,
                     extra: serde_json::Value::Null,
                 },
             })
