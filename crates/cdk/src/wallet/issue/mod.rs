@@ -192,7 +192,6 @@ impl Wallet {
         extra: Option<String>,
     ) -> Result<MintQuote, Error> {
         let mint_info = self.load_mint_info().await?;
-        let mint_url = self.mint_url.clone();
         let unit = self.unit.clone();
 
         // Check settings and description support
@@ -253,6 +252,18 @@ impl Wallet {
             }
         };
 
+        self.submit_mint_quote_request(method, request, amount, secret_key)
+            .await
+    }
+
+    /// Post a prepared mint quote request and persist the resulting quote.
+    pub(crate) async fn submit_mint_quote_request(
+        &self,
+        method: PaymentMethod,
+        request: MintQuoteRequest,
+        amount: Option<Amount>,
+        secret_key: SecretKey,
+    ) -> Result<MintQuote, Error> {
         let response: MintQuoteResponse<String> = self.client.post_mint_quote(request).await?;
         let quote_id = response.quote().to_string();
         let request_str = response.request().to_string();
@@ -260,10 +271,10 @@ impl Wallet {
 
         let mut quote = MintQuote::new(
             quote_id,
-            mint_url,
+            self.mint_url.clone(),
             method.clone(),
             local_mint_quote_amount(&method, amount),
-            unit,
+            self.unit.clone(),
             request_str,
             expiry.unwrap_or(0),
             Some(secret_key),

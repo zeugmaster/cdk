@@ -54,6 +54,7 @@ mod mint_metadata_cache;
 mod npubcash;
 #[cfg(feature = "nwc")]
 pub mod nwc;
+mod offer;
 mod p2pk;
 pub mod payment_request;
 mod proofs;
@@ -95,6 +96,7 @@ pub use nostr_backup::{BackupOptions, BackupResult, RestoreOptions, RestoreResul
 pub use npubcash::derive_npubcash_secret_key_from_seed;
 #[cfg(feature = "nwc")]
 pub use nwc::{derive_nwc_secret_key_from_seed, WalletNwcHandler};
+pub use offer::ClaimedOffer;
 pub use payment_request::CreateRequestParams;
 #[cfg(feature = "nostr")]
 pub use payment_request::NostrWaitInfo;

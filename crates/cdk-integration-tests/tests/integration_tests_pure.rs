@@ -2565,6 +2565,378 @@ async fn test_custom_melt_quote_id_propagates_to_payment_processor() {
     );
 }
 
+/// In-process payment backend implementing the NUT-XX ticket semantics: it
+/// issues single-use tickets, reads mint-offer claims from the `"ticket"` key
+/// of `extra_json`, treats the melt-quote `request` as a melt ticket, and
+/// rejects unknown/claimed tickets with the typed payment errors.
+#[derive(Debug, Default)]
+struct TicketedPaymentProcessor {
+    /// ticket id -> (amount, claimed)
+    tickets: std::sync::Mutex<HashMap<String, (u64, bool)>>,
+    /// `extra_json` received by the last `create_incoming_payment_request`
+    last_incoming_extra_json: std::sync::Mutex<Option<String>>,
+    /// (request, quote_id) received by the last `get_payment_quote`
+    last_outgoing: std::sync::Mutex<Option<(String, cdk_common::QuoteId)>>,
+}
+
+impl TicketedPaymentProcessor {
+    fn seed_ticket(&self, id: &str, amount: u64) {
+        self.tickets
+            .lock()
+            .expect("poisoned")
+            .insert(id.to_string(), (amount, false));
+    }
+
+    /// First claim wins: unknown tickets error with 20010 semantics, repeat
+    /// claims with 20011.
+    fn claim_ticket(&self, id: &str) -> Result<u64, cdk_common::payment::Error> {
+        let mut tickets = self.tickets.lock().expect("poisoned");
+        match tickets.get_mut(id) {
+            None => Err(cdk_common::payment::Error::TicketUnknownOrExpired),
+            Some((_, claimed)) if *claimed => Err(cdk_common::payment::Error::TicketAlreadyClaimed),
+            Some((amount, claimed)) => {
+                *claimed = true;
+                Ok(*amount)
+            }
+        }
+    }
+
+    fn last_incoming_extra_json(&self) -> Option<String> {
+        self.last_incoming_extra_json
+            .lock()
+            .expect("poisoned")
+            .clone()
+    }
+
+    fn last_outgoing(&self) -> Option<(String, cdk_common::QuoteId)> {
+        self.last_outgoing.lock().expect("poisoned").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl MintPayment for TicketedPaymentProcessor {
+    type Err = cdk_common::payment::Error;
+
+    async fn get_settings(&self) -> Result<cdk_common::payment::SettingsResponse, Self::Err> {
+        Ok(cdk_common::payment::SettingsResponse {
+            unit: CurrencyUnit::Sat.to_string(),
+            bolt11: None,
+            bolt12: None,
+            onchain: None,
+            custom: HashMap::from([("test-custom".to_string(), "{}".to_string())]),
+        })
+    }
+
+    async fn create_incoming_payment_request(
+        &self,
+        options: cdk_common::payment::IncomingPaymentOptions,
+    ) -> Result<cdk_common::payment::CreateIncomingPaymentResponse, Self::Err> {
+        match options {
+            cdk_common::payment::IncomingPaymentOptions::Custom(opts) => {
+                *self.last_incoming_extra_json.lock().expect("poisoned") = opts.extra_json.clone();
+
+                // Mint offers are claimed via the "ticket" key of extra_json.
+                let ticket = opts
+                    .extra_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                    .and_then(|value| {
+                        value
+                            .get("ticket")
+                            .and_then(|t| t.as_str().map(str::to_string))
+                    })
+                    .ok_or(cdk_common::payment::Error::TicketUnknownOrExpired)?;
+
+                self.claim_ticket(&ticket)?;
+
+                Ok(cdk_common::payment::CreateIncomingPaymentResponse {
+                    request_lookup_id: PaymentIdentifier::CustomId(ticket.clone()),
+                    request: ticket,
+                    expiry: opts.unix_expiry,
+                    extra_json: None,
+                })
+            }
+            _ => Err(cdk_common::payment::Error::UnsupportedPaymentOption),
+        }
+    }
+
+    async fn get_payment_quote(
+        &self,
+        unit: &CurrencyUnit,
+        options: OutgoingPaymentOptions,
+    ) -> Result<PaymentQuoteResponse, Self::Err> {
+        match options {
+            OutgoingPaymentOptions::Custom(custom) => {
+                // Melt offers use the request string as the ticket; the payout
+                // amount is authoritative from the ticket, not the wallet.
+                let ticket = custom.request.trim().to_string();
+                *self.last_outgoing.lock().expect("poisoned") =
+                    Some((ticket.clone(), custom.quote_id.clone()));
+
+                let amount = self.claim_ticket(&ticket)?;
+
+                Ok(PaymentQuoteResponse {
+                    request_lookup_id: Some(PaymentIdentifier::CustomId(ticket)),
+                    amount: Amount::new(amount, unit.clone()),
+                    fee: Amount::new(0, unit.clone()),
+                    state: cdk_common::nuts::MeltQuoteState::Unpaid,
+                    estimated_blocks: None,
+                    extra_json: None,
+                    fee_options: None,
+                })
+            }
+            _ => Err(cdk_common::payment::Error::UnsupportedPaymentOption),
+        }
+    }
+
+    async fn make_payment(
+        &self,
+        _unit: &CurrencyUnit,
+        _options: OutgoingPaymentOptions,
+    ) -> Result<cdk_common::payment::MakePaymentResponse, Self::Err> {
+        Err(cdk_common::payment::Error::UnsupportedPaymentOption)
+    }
+
+    async fn wait_payment_event(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = cdk_common::payment::Event> + Send>>, Self::Err> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn is_payment_event_stream_active(&self) -> bool {
+        false
+    }
+
+    fn cancel_payment_event_stream(&self) {}
+
+    async fn check_incoming_payment_status(
+        &self,
+        _payment_identifier: &PaymentIdentifier,
+    ) -> Result<Vec<cdk_common::payment::WaitPaymentResponse>, Self::Err> {
+        Ok(vec![])
+    }
+
+    async fn check_outgoing_payment(
+        &self,
+        payment_identifier: &PaymentIdentifier,
+    ) -> Result<cdk_common::payment::MakePaymentResponse, Self::Err> {
+        Ok(cdk_common::payment::MakePaymentResponse {
+            payment_lookup_id: payment_identifier.clone(),
+            payment_proof: None,
+            status: cdk_common::nuts::MeltQuoteState::Pending,
+            total_spent: Amount::new(0, CurrencyUnit::Sat),
+        })
+    }
+}
+
+async fn create_ticketed_mint_and_wallet(
+) -> (Mint, cdk::wallet::Wallet, Arc<TicketedPaymentProcessor>) {
+    let localstore = Arc::new(cdk_sqlite::mint::memory::empty().await.expect("memory db"));
+    let processor = Arc::new(TicketedPaymentProcessor::default());
+
+    let mut mint_builder = cdk::mint::MintBuilder::new(localstore.clone());
+    let mnemonic = Mnemonic::generate(12).expect("mnemonic");
+    mint_builder
+        .add_payment_processor(
+            CurrencyUnit::Sat,
+            PaymentMethod::Custom("test-custom".to_string()),
+            cdk::mint::MintMeltLimits::new(1, 10_000),
+            processor.clone(),
+        )
+        .await
+        .expect("custom payment processor");
+
+    mint_builder = mint_builder
+        .with_name("quote offer test mint".to_string())
+        .with_description("quote offer test mint".to_string())
+        .with_urls(vec!["https://example-mint".to_string()])
+        .with_limits(2000, 2000);
+
+    let mint = mint_builder
+        .build_with_seed(localstore.clone(), &mnemonic.to_seed_normalized(""))
+        .await
+        .expect("mint build");
+
+    mint.set_quote_ttl(QuoteTTL::new(10_000, 10_000))
+        .await
+        .expect("quote ttl");
+
+    let wallet = create_test_wallet_for_mint(mint.clone())
+        .await
+        .expect("wallet for mint");
+
+    (mint, wallet, processor)
+}
+
+fn offer_for_wallet(
+    wallet: &cdk::wallet::Wallet,
+    operation: cdk::nuts::OfferOperation,
+    ticket: &str,
+    amount: Option<u64>,
+) -> cdk::nuts::QuoteOffer {
+    cdk::nuts::QuoteOffer {
+        mint_url: wallet.mint_url.clone(),
+        operation,
+        method: PaymentMethod::Custom("test-custom".to_string()),
+        unit: CurrencyUnit::Sat,
+        amount: amount.map(Amount::from),
+        ticket: ticket.to_string(),
+        description: None,
+        expiry: None,
+    }
+}
+
+#[tokio::test]
+async fn test_mint_offer_claim_happy_path() {
+    setup_tracing();
+
+    let (mint, wallet, processor) = create_ticketed_mint_and_wallet().await;
+    processor.seed_ticket("MINT-1", 500);
+
+    let offer = offer_for_wallet(
+        &wallet,
+        cdk::nuts::OfferOperation::Mint,
+        "MINT-1",
+        Some(500),
+    );
+    // The offer string round trips through its wire encoding.
+    let offer: cdk::nuts::QuoteOffer = offer.to_string().parse().expect("offer round trip");
+
+    let claimed = wallet
+        .claim_quote_offer(&offer)
+        .await
+        .expect("claim mint offer");
+
+    let quote = match claimed {
+        cdk::wallet::ClaimedOffer::Mint(quote) => quote,
+        other => panic!("expected mint quote, got {other:?}"),
+    };
+
+    // The quote is locked to a wallet key (NUT-20) for the signed mint later.
+    assert!(quote.secret_key.is_some());
+
+    // The backend received the ticket inside extra_json.
+    let extra_json = processor
+        .last_incoming_extra_json()
+        .expect("backend saw extra_json");
+    let extra: serde_json::Value = serde_json::from_str(&extra_json).expect("valid json");
+    assert_eq!(extra["ticket"], "MINT-1");
+
+    // The mint persisted the quote with the wallet's pubkey.
+    let mint_quote = mint
+        .localstore()
+        .get_mint_quote(&quote.id.parse().expect("quote id"))
+        .await
+        .expect("db read")
+        .expect("stored mint quote");
+    assert!(mint_quote.pubkey.is_some());
+}
+
+#[tokio::test]
+async fn test_mint_offer_requires_pubkey() {
+    setup_tracing();
+
+    let (mint, _wallet, processor) = create_ticketed_mint_and_wallet().await;
+    processor.seed_ticket("MINT-1", 500);
+
+    // The wallet always sends a pubkey, so hit the mint directly.
+    let err = mint
+        .get_mint_quote(cdk_common::MintQuoteRequest::Custom {
+            method: PaymentMethod::Custom("test-custom".to_string()),
+            request: cdk::nuts::MintQuoteCustomRequest {
+                amount: Some(Amount::from(500)),
+                unit: CurrencyUnit::Sat,
+                description: None,
+                pubkey: None,
+                ticket: Some("MINT-1".to_string()),
+                extra: serde_json::Value::Null,
+            },
+        })
+        .await
+        .expect_err("ticket without pubkey must be rejected");
+
+    assert!(matches!(err, cdk::Error::PubkeyRequired));
+}
+
+#[tokio::test]
+async fn test_mint_offer_unknown_ticket() {
+    setup_tracing();
+
+    let (_mint, wallet, _processor) = create_ticketed_mint_and_wallet().await;
+
+    let offer = offer_for_wallet(
+        &wallet,
+        cdk::nuts::OfferOperation::Mint,
+        "MINT-unknown",
+        Some(500),
+    );
+    let err = wallet
+        .claim_quote_offer(&offer)
+        .await
+        .expect_err("unknown ticket must be rejected");
+
+    assert!(matches!(err, cdk::Error::OfferTicketUnknownOrExpired));
+}
+
+#[tokio::test]
+async fn test_mint_offer_double_claim() {
+    setup_tracing();
+
+    let (_mint, wallet, processor) = create_ticketed_mint_and_wallet().await;
+    processor.seed_ticket("MINT-1", 500);
+
+    let offer = offer_for_wallet(
+        &wallet,
+        cdk::nuts::OfferOperation::Mint,
+        "MINT-1",
+        Some(500),
+    );
+
+    wallet
+        .claim_quote_offer(&offer)
+        .await
+        .expect("first claim wins");
+
+    let err = wallet
+        .claim_quote_offer(&offer)
+        .await
+        .expect_err("second claim must be rejected");
+
+    assert!(matches!(err, cdk::Error::OfferTicketAlreadyClaimed));
+}
+
+#[tokio::test]
+async fn test_melt_offer_claim() {
+    setup_tracing();
+
+    let (_mint, wallet, processor) = create_ticketed_mint_and_wallet().await;
+    processor.seed_ticket("MELT-1", 21);
+
+    // Melt offers carry no amount for the wallet; the ticket dictates it.
+    let offer = offer_for_wallet(&wallet, cdk::nuts::OfferOperation::Melt, "MELT-1", None);
+    let offer: cdk::nuts::QuoteOffer = offer.to_string().parse().expect("offer round trip");
+
+    let claimed = wallet
+        .claim_quote_offer(&offer)
+        .await
+        .expect("claim melt offer");
+
+    let quote = match claimed {
+        cdk::wallet::ClaimedOffer::Melt(quote) => quote,
+        other => panic!("expected melt quote, got {other:?}"),
+    };
+
+    // The payout amount is authoritative from the ticket, and the ticket is
+    // the quote's request.
+    assert_eq!(quote.amount, Amount::from(21));
+    assert_eq!(quote.request, "MELT-1");
+
+    // The backend saw the ticket as the request with the mint's quote_id.
+    let (seen_request, seen_quote_id) = processor.last_outgoing().expect("backend saw the claim");
+    assert_eq!(seen_request, "MELT-1");
+    assert_eq!(seen_quote_id.to_string(), quote.id);
+}
+
 /// Test that a wallet holding P2PK-locked proofs can spend them via `prepare_send` / `confirm`
 /// by providing `p2pk_signing_keys` in `SendOptions`.
 ///
